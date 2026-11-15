@@ -1,9 +1,12 @@
 # PulBot — Telegram referral bot (Render uchun tayyor)
 
-PulBot — do'st taklif qilib so'm ishlash botidir: start bonus, kunlik bonus va streak,
+PulBot — do'st taklif qilib so'm ishlash botidir: kunlik bonus va streak,
 ikki darajali referral, haftalik reyting va konkurs, pul yechish (Uzcard/Humo/telefon puli),
 homiy kanallar orqali daromad, to'liq admin panel (narxlar, foydalanuvchilar, xavfsizlik,
 broadcast, CSV eksport). Barcha inline va oddiy tugmalar **rangli** (yashil/qizil/ko'k).
+
+> **Start bonusi:** standart holatda **o'chirilgan (0)** — `/start` uchun pul berilmaydi.
+> Xohlasangiz admin panel → «Narxlar va bonuslar» → «Start bonus» orqali yoqish mumkin.
 
 ## Fayllar
 
