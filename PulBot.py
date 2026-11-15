@@ -50,7 +50,7 @@ def today_local() -> date:
 # key: (default, sarlavha, guruh)   guruh: price | limit | sys | text | hidden
 # ----------------------------------------------------------------------------
 SETTINGS = {
-    "start_bonus": (500, "Start bonus (so'm)", "price"),
+    "start_bonus": (0, "Start bonus (so'm, 0 = o'chirilgan)", "price"),
     "ref_l1": (300, "Taklif uchun bonus, 1-daraja (so'm)", "price"),
     "ref_l2": (50, "Taklif uchun bonus, 2-daraja (so'm)", "price"),
     "daily_min": (50, "Kunlik bonus MIN (so'm)", "price"),
@@ -144,6 +144,21 @@ def fmt(n) -> str:
 
 def esc(s) -> str:
     return html.escape(str(s or ""))
+
+
+DIV = "━━━━━━━━━━━━━━━━"
+THIN = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+
+
+def bar(pct, width: int = 10) -> str:
+    """Progress-bar: ▓▓▓▓▓░░░░░ 52%"""
+    pct = max(0.0, min(100.0, float(pct or 0)))
+    filled = int(round(pct / 100 * width))
+    return "▓" * filled + "░" * (width - filled) + f" {int(pct)}%"
+
+
+def money(n) -> str:
+    return f"<code>{fmt(n)}</code> so'm"
 
 
 async def q(sql, args=()):
@@ -246,6 +261,19 @@ async def answer_html(message: Message, text: str, **kw):
         await message.answer(html.escape(re.sub(r"<[^>]+>", "", text)), **kw)
 
 
+class Ctx:
+    """Message va CallbackQuery ikkalasida ham bir xil ishlaydigan kontekst."""
+
+    def __init__(self, bot: Bot, chat_id: int, uid: int, name: str = ""):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.uid = uid
+        self.name = name
+
+    async def send(self, text, **kw):
+        return await self.bot.send_message(self.chat_id, text, **kw)
+
+
 # ----------------------------------------------------------------------------
 # TUGMALAR (hammasi rangli)
 # ----------------------------------------------------------------------------
@@ -292,7 +320,12 @@ async def gate(bot, uid, chat_id) -> bool:
         for s in bad:
             kb.row(ib(f"📢 {s['title']}", url=s["link"]))
         kb.row(ib("✅ Tekshirish", callback_data="chk", style=OK))
-        await bot.send_message(chat_id, "Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:",
+        await bot.send_message(chat_id,
+                               f"🔒 <b>OBUNA TALAB QILINADI</b>\n{DIV}\n"
+                               f"Botdan foydalanish uchun quyidagi kanallarga\n"
+                               f"obuna bo'ling, so'ng «✅ Tekshirish»ni bosing.\n"
+                               f"{THIN}\n"
+                               f"<i>Obuna bo'lgach bonuslar avtomatik faollashadi.</i>",
                                reply_markup=kb.as_markup())
         return False
     u = await get_user(uid)
@@ -425,6 +458,51 @@ MENU = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=B_RULES, style=MAIN), KeyboardButton(text=B_HELP, style=OK)]])
 
 
+def main_kb():
+    """/start da chiqadigan rangli tezkor tugmalar."""
+    kb = InlineKeyboardBuilder()
+    kb.row(ib("🎁 Bonus olish", callback_data="m:daily", style=OK),
+           ib("👥 Do'st taklif", callback_data="m:invite", style=OK))
+    kb.row(ib("💰 Balansim", callback_data="m:bal", style=MAIN),
+           ib("💳 Pul yechish", callback_data="m:wd", style=BAD))
+    kb.row(ib("🏆 Reyting", callback_data="m:rate", style=MAIN),
+           ib("⭐ Premium", callback_data="m:prem", style=MAIN))
+    kb.row(ib("📜 Qoidalar", callback_data="m:rules", style=MAIN),
+           ib("🆘 Yordam", callback_data="m:help", style=OK))
+    return kb
+
+
+async def start_card(bot, chat_id, uid):
+    """Asosiy menyu + hisob kartochkasi."""
+    u = await get_user(uid)
+    if not u:
+        return
+    refs = (await q1("SELECT COUNT(*) c FROM referrals WHERE inviter_id=? AND status='confirmed'",
+                     (uid,)))["c"]
+    daily = "⏳ bugun olingan" if u["last_daily"] == today_local().isoformat() else "✅ mavjud"
+    prem = "⭐ Premium" if u["is_premium"] else "🔹 Standart"
+    name = esc((u["full_name"] or "do'stim").split()[0][:20])
+    await answer_html_msg(bot, chat_id,
+                         f"👋 Salom, <b>{name}</b>!\n{DIV}\n"
+                         f"🏦 <b>Hisobingiz</b>\n"
+                         f"├ 💰 Balans: {money(u['balance'])}\n"
+                         f"├ 🎁 Kunlik bonus: {daily}\n"
+                         f"├ 👥 Takliflar: <b>{refs} ta</b>\n"
+                         f"└ {prem}\n{DIV}\n"
+                         f"👇 Quyidagi menyudan foydalaning",
+                         reply_markup=MENU)
+    await bot.send_message(chat_id, "⚡ <b>Tez amallar</b>",
+                           reply_markup=main_kb().as_markup())
+
+
+async def answer_html_msg(bot, chat_id, text, **kw):
+    try:
+        await bot.send_message(chat_id, text, **kw)
+    except TelegramBadRequest:
+        await bot.send_message(chat_id, html.escape(re.sub(r"<[^>]+>", "", text)), **kw)
+
+
+
 # ----------------------------------------------------------------------------
 # FOYDALANUVCHI QISMI
 # ----------------------------------------------------------------------------
@@ -433,6 +511,7 @@ async def cmd_start(m: Message, command: CommandObject, state: FSMContext, bot: 
     await state.clear()
     uid = m.from_user.id
     if not await get_user(uid):
+        is_new = True
         ref = None
         if command.args and command.args.isdigit() and int(command.args) != uid:
             r = await get_user(int(command.args))
@@ -445,11 +524,13 @@ async def cmd_start(m: Message, command: CommandObject, state: FSMContext, bot: 
                              (uid, ref, now()))
         await db.commit()
     else:
+        is_new = False
         await ex("UPDATE users SET username=?, full_name=? WHERE id=?",
                  (m.from_user.username, m.from_user.full_name, uid))
-    await answer_html(m, await gs("welcome_text"))
+    if is_new:
+        await answer_html(m, await gs("welcome_text"))
     if await gate(bot, uid, m.chat.id):
-        await m.answer("🏠 Asosiy menyu", reply_markup=MENU)
+        await start_card(bot, m.chat.id, uid)
 
 
 @user.message(Command("cancel"))
@@ -466,7 +547,7 @@ async def cb_check(c: CallbackQuery, bot: Bot):
             await c.message.delete()
         except Exception:
             pass
-        await bot.send_message(c.message.chat.id, "🏠 Asosiy menyu", reply_markup=MENU)
+        await start_card(bot, c.message.chat.id, c.from_user.id)
     else:
         await c.answer("Hali hamma kanalga obuna bo'lmadingiz", show_alert=True)
 
@@ -494,44 +575,109 @@ async def menu_router(m: Message, state: FSMContext, bot: Bot):
         return
     t = m.text
     if t == B_BAL:
-        await view_balance(m)
+        await view_balance(bot, m.chat.id, uid)
     elif t == B_INV:
-        await view_invite(m, bot)
+        await view_invite(bot, m.chat.id, uid, m.from_user.full_name)
     elif t == B_DAILY:
-        await view_daily(m)
+        await view_daily(bot, m.chat.id, uid)
     elif t == B_WD:
         await withdraw_start(m, state)
     elif t == B_RATE:
-        await view_rating(m)
+        await view_rating(bot, m.chat.id, uid)
     elif t == B_PREM:
-        await view_premium(m)
+        await view_premium(bot, m.chat.id, uid)
     elif t == B_RULES:
         await answer_html(m, await gs("rules_text"))
     elif t == B_HELP:
         await state.set_state(H.msg)
-        await m.answer("✍️ Savol yoki muammoingizni yozing\n(bekor qilish: /cancel):")
+        await m.answer(f"✍️ <b>Yordam</b>\n{DIV}\nSavol yoki muammoingizni yozing.\n"
+                       f"Admin tez orada javob beradi.\n\n<i>Bekor qilish: /cancel</i>")
 
 
-async def view_balance(m: Message):
-    u = await get_user(m.from_user.id)
-    rows = await q("SELECT * FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 5", (u["id"],))
-    hist = "\n".join(f"{'➕' if r['amount'] > 0 else '➖'} {fmt(abs(r['amount']))} — "
+@user.callback_query(F.data.startswith("m:"))
+async def menu_cb(c: CallbackQuery, state: FSMContext, bot: Bot):
+    """Inline tezkor tugmalar."""
+    act = c.data.split(":")[1]
+    uid, chat_id = c.from_user.id, c.message.chat.id
+    if act == "wd":
+        await c.answer()
+        await withdraw_start(c.message, state, uid=uid)
+        return
+    if not await gate(bot, uid, chat_id):
+        return await c.answer("Avval kanallarga obuna bo'ling", show_alert=True)
+    await c.answer()
+    if act == "bal":
+        await view_balance(bot, chat_id, uid)
+    elif act == "invite":
+        await view_invite(bot, chat_id, uid, c.from_user.full_name)
+    elif act == "daily":
+        await view_daily(bot, chat_id, uid)
+    elif act == "rate":
+        await view_rating(bot, chat_id, uid)
+    elif act == "prem":
+        await view_premium(bot, chat_id, uid)
+    elif act == "rules":
+        await answer_html_msg(bot, chat_id, await gs("rules_text"))
+    elif act == "help":
+        await state.set_state(H.msg)
+        await bot.send_message(chat_id, f"🆘 <b>YORDAM</b>\n{DIV}\n"
+                                      f"Savol yoki muammoingizni bitta xabarda yozing.\n"
+                                      f"Admin tez orada javob beradi.\n\n"
+                                      f"<i>Bekor qilish: /cancel</i>")
+
+
+async def view_balance(bot: Bot, chat_id: int, uid: int):
+    u = await get_user(uid)
+    if not u:
+        return
+    rows = await q("SELECT * FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 5", (uid,))
+    hist = "\n".join(f"{'🟢' if r['amount'] > 0 else '🔴'} "
+                     f"{'+' if r['amount'] > 0 else '−'}{fmt(abs(r['amount'])).replace(' ', '')} so'm · "
                      f"{REASONS.get(r['reason'], r['reason'])}" for r in rows) or "Hali amallar yo'q"
-    await m.answer(f"💰 <b>Balans: {fmt(u['balance'])} so'm</b>\n\n"
-                   f"Jami topilgan: {fmt(u['total_earned'])} so'm\n"
-                   f"Jami yechilgan: {fmt(u['total_withdrawn'])} so'm\n\n"
-                   f"<b>Oxirgi amallar:</b>\n{hist}")
+    mn = await gs("min_withdraw")
+    pct = (u["balance"] / mn * 100) if mn else 100
+    kb = InlineKeyboardBuilder()
+    kb.row(ib("🎁 Bonus olish", callback_data="m:daily", style=OK),
+           ib("👥 Taklif qilish", callback_data="m:invite", style=OK))
+    kb.row(ib("💳 Pul yechish", callback_data="m:wd", style=BAD))
+    await bot.send_message(chat_id,
+                           f"💼 <b>HISOBIM</b>\n{DIV}\n"
+                           f"💳 Balans: <b>{fmt(u['balance'])} so'm</b>\n"
+                           f"{THIN}\n"
+                           f"📈 Jami topilgan: {money(u['total_earned'])}\n"
+                           f"📉 Jami yechilgan: {money(u['total_withdrawn'])}\n"
+                           f"⭐ Maqom: <b>{'Premium' if u['is_premium'] else 'Standart'}</b>\n"
+                           f"{DIV}\n"
+                           f"🎯 Yechish minimumi: {money(mn)}\n"
+                           f"{bar(pct)}\n"
+                           f"{THIN}\n"
+                           f"🧾 <b>Oxirgi amallar</b>\n{hist}",
+                           reply_markup=kb.as_markup())
 
 
 def make_card(name, balance, link) -> bytes | None:
+    """Do'stlarga yuborish uchun chiroyli karta."""
     try:
         from PIL import Image, ImageDraw, ImageFont
-        img = Image.new("RGB", (900, 500), (24, 119, 242))
+
+        W_, H_ = 1000, 560
+        img = Image.new("RGB", (W_, H_), (12, 16, 28))
         d = ImageDraw.Draw(img)
-        d.text((50, 60), "Men yig'dim:", fill="white", font=ImageFont.load_default(size=50))
-        d.text((50, 150), f"{fmt(balance)} so'm", fill=(255, 235, 59), font=ImageFont.load_default(size=110))
-        d.text((50, 340), f"{str(name)[:30]}", fill="white", font=ImageFont.load_default(size=40))
-        d.text((50, 410), link, fill="white", font=ImageFont.load_default(size=32))
+        # gradient fon
+        for y in range(H_):
+            t = y / H_
+            d.line([(0, y), (W_, y)], fill=(int(12 + 30 * t), int(16 + 50 * t), int(28 + 90 * t)))
+        # oltin ramka
+        d.rounded_rectangle([30, 30, W_ - 30, H_ - 30], radius=28, outline=(255, 200, 60), width=3)
+        d.ellipse([W_ - 210, -90, W_ + 60, 180], fill=(255, 200, 60))
+        d.text((70, 75), "PUL ISHLA UZ", fill=(255, 200, 60), font=ImageFont.load_default(size=30))
+        d.text((70, 130), "Men yig'dim", fill=(200, 210, 225), font=ImageFont.load_default(size=40))
+        d.text((70, 200), f"{fmt(balance)} so'm", fill="white", font=ImageFont.load_default(size=96))
+        d.line([(70, 340), (W_ - 70, 340)], fill=(70, 85, 110), width=2)
+        d.text((70, 370), f"👤 {str(name)[:28]}", fill=(210, 220, 235), font=ImageFont.load_default(size=36))
+        d.text((70, 425), "🔗 " + link, fill=(120, 175, 255), font=ImageFont.load_default(size=30))
+        d.text((70, 480), "Siz ham taklif qiling va pul ishlang!", fill=(255, 200, 60),
+               font=ImageFont.load_default(size=26))
         buf = io.BytesIO()
         img.save(buf, "PNG")
         return buf.getvalue()
@@ -540,8 +686,7 @@ def make_card(name, balance, link) -> bytes | None:
         return None
 
 
-async def view_invite(m: Message, bot: Bot):
-    uid = m.from_user.id
+async def view_invite(bot: Bot, chat_id: int, uid: int, name: str = ""):
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={uid}"
     st = {r["status"]: r["c"] for r in await q(
@@ -553,40 +698,57 @@ async def view_invite(m: Message, bot: Bot):
     kb.row(ib("📤 Do'stlarga ulashish",
               url=f"https://t.me/share/url?url={link}&text=Bu botda so'm ishlash mumkin!",
               style=OK))
-    text = (f"👥 <b>Do'st taklif qiling</b>\n\nHar bir do'st uchun: <b>{fmt(l1 * mult)} so'm</b>\n"
-            f"Do'stingizning do'sti uchun: <b>{fmt(l2)} so'm</b>\n\n🔗 Havolangiz:\n<code>{link}</code>\n\n"
-            f"✅ Tasdiqlangan: {st.get('confirmed', 0)}\n⏳ Kutilayotgan: {st.get('pending', 0)}\n"
-            f"↩️ Bekor qilingan: {st.get('revoked', 0) + st.get('limited', 0)}")
-    card = make_card(m.from_user.full_name, u["total_earned"], link)
+    kb.row(ib("💰 Balansim", callback_data="m:bal", style=MAIN),
+           ib("🏆 Reyting", callback_data="m:rate", style=MAIN))
+    text = (f"👥 <b>DO'ST TAKLIF QILISH</b>\n{DIV}\n"
+            f"💸 Har bir do'st uchun: <b>{fmt(l1 * mult)} so'm</b>\n"
+            f"🎁 Do'stingizning do'sti uchun: <b>{fmt(l2)} so'm</b>\n"
+            f"{THIN}\n"
+            f"✅ Tasdiqlangan: <b>{st.get('confirmed', 0)}</b>\n"
+            f"⏳ Kutilayotgan: <b>{st.get('pending', 0)}</b>\n"
+            f"↩️ Bekor qilingan: <b>{st.get('revoked', 0) + st.get('limited', 0)}</b>\n"
+            f"{DIV}\n"
+            f"🔗 <b>Sizning havolangiz:</b>\n<code>{link}</code>")
+    card = make_card(name or (u["full_name"] or ""), u["total_earned"], link)
     if card:
-        await m.answer_photo(BufferedInputFile(card, "card.png"), caption=text, reply_markup=kb.as_markup())
+        await bot.send_photo(chat_id, BufferedInputFile(card, "card.png"),
+                             caption=text, reply_markup=kb.as_markup())
     else:
-        await m.answer(text, reply_markup=kb.as_markup())
+        await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
 
 
-async def view_daily(m: Message):
-    u = await get_user(m.from_user.id)
+async def view_daily(bot: Bot, chat_id: int, uid: int):
+    u = await get_user(uid)
     today = today_local().isoformat()
     yest = (today_local() - timedelta(days=1)).isoformat()
     if u["last_daily"] == today:
-        return await m.answer(f"⏳ Bugungi bonus olingan. Streak: <b>{u['streak']}</b> kun. Ertaga qaytib keling!")
+        return await bot.send_message(chat_id,
+                                      f"⏳ <b>Bugungi bonus allaqachon olingan</b>\n{DIV}\n"
+                                      f"🔥 Streak: <b>{u['streak']} kun</b>\n"
+                                      f"🗓 Ertaga qayta tashrif buyuring — bonus yangilanadi!")
     streak = u["streak"] + 1 if u["last_daily"] == yest else 1
     lo, hi = await gs("daily_min"), await gs("daily_max")
     amt = random.randint(min(lo, hi), max(lo, hi))
     if u["is_premium"]:
         amt *= await gs("premium_multiplier")
-    await ex("UPDATE users SET last_daily=?, streak=? WHERE id=?", (today, streak, u["id"]))
-    await add_balance(u["id"], amt, "daily")
-    text = f"🎁 Kunlik bonus: <b>+{fmt(amt)} so'm</b>\n🔥 Streak: {streak} kun"
+    await ex("UPDATE users SET last_daily=?, streak=? WHERE id=?", (today, streak, uid))
+    await add_balance(uid, amt, "daily")
+    text = (f"🎁 <b>KUNLIK BONUS</b>\n{DIV}\n"
+            f"✅ Hisobingizga qo'shildi: <b>+{fmt(amt)} so'm</b>\n"
+            f"🔥 Streak: <b>{streak} kun</b>  {bar(min(100, streak / 7 * 100)).rsplit(' ', 1)[0]}\n"
+            f"<i>7-kunda katta bonus sizni kutmoqda!</i>")
     if streak % 7 == 0:
         sb = await gs("streak_bonus")
         if sb:
-            await add_balance(u["id"], sb, "streak")
+            await add_balance(uid, sb, "streak")
             text += f"\n🏅 7 kunlik streak bonusi: <b>+{fmt(sb)} so'm</b>"
-    await m.answer(text)
+    kb = InlineKeyboardBuilder()
+    kb.row(ib("👥 Do'st taklif qilish", callback_data="m:invite", style=OK),
+           ib("💰 Balansim", callback_data="m:bal", style=MAIN))
+    await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
 
 
-async def view_rating(m: Message):
+async def view_rating(bot: Bot, chat_id: int, uid: int):
     cutoff = now() - 7 * 86400
     rows = await q("SELECT inviter_id, COUNT(*) c FROM referrals WHERE status='confirmed' AND confirmed_at>? "
                    "GROUP BY inviter_id ORDER BY c DESC LIMIT 10", (cutoff,))
@@ -595,26 +757,49 @@ async def view_rating(m: Message):
     for i, r in enumerate(rows):
         u = await get_user(r["inviter_id"])
         name = esc(u["full_name"])[:20] if u else f"ID {r['inviter_id']}"
-        lines.append(f"{medals[i]} {i + 1}. {name} — {r['c']} ta")
+        lines.append(f"{medals[i]} <b>{i + 1}.</b> {name} — <b>{r['c']}</b> ta")
     mine = (await q1("SELECT COUNT(*) c FROM referrals WHERE inviter_id=? AND status='confirmed' "
-                     "AND confirmed_at>?", (m.from_user.id, cutoff)))["c"]
+                     "AND confirmed_at>?", (uid, cutoff)))["c"]
     p1, p2, p3 = await gs("week_prize_1"), await gs("week_prize_2"), await gs("week_prize_3")
-    await m.answer("🏆 <b>Haftalik reyting (oxirgi 7 kun)</b>\n\n" + ("\n".join(lines) or "Hali hech kim yo'q") +
-                   f"\n\n📌 Sizning natijangiz: <b>{mine}</b> ta\n\n🎁 Mukofotlar (yakshanba kuni):\n"
-                   f"🥇 {fmt(p1)} so'm\n🥈 {fmt(p2)} so'm\n🥉 {fmt(p3)} so'm")
+    kb = InlineKeyboardBuilder()
+    kb.row(ib("👥 Taklif qilish", callback_data="m:invite", style=OK),
+           ib("💰 Balansim", callback_data="m:bal", style=MAIN))
+    await bot.send_message(chat_id,
+                           f"🏆 <b>HAFTALIK REYTING</b>\n<i>oxirgi 7 kun</i>\n{DIV}\n" +
+                           ("\n".join(lines) or "Hali hech kim yo'q — birinchi bo'ling! 🚀") +
+                           f"\n{DIV}\n📌 Sizning natijangiz: <b>{mine} ta</b>\n{THIN}\n"
+                           f"🎁 <b>Mukofotlar (yakshanba):</b>\n"
+                           f"🥇 {money(p1)}\n🥈 {money(p2)}\n🥉 {money(p3)}",
+                           reply_markup=kb.as_markup())
 
 
-async def view_premium(m: Message):
-    u = await get_user(m.from_user.id)
+async def view_premium(bot: Bot, chat_id: int, uid: int):
+    u = await get_user(uid)
     need = await gs("premium_refs")
     have = (await q1("SELECT COUNT(*) c FROM referrals WHERE inviter_id=? AND status='confirmed'",
-                     (u["id"],)))["c"]
+                     (uid,)))["c"]
     mult = await gs("premium_multiplier")
+    kb = InlineKeyboardBuilder()
     if u["is_premium"]:
-        return await m.answer(f"⭐ Siz <b>Premium</b> a'zosisiz! Barcha bonuslar <b>{mult}x</b>.")
-    await m.answer(f"⭐ <b>Premium</b>\n\nImkoniyat: taklif va kunlik bonuslar <b>{mult}x</b>.\n"
-                   f"Shart: {need} ta tasdiqlangan taklif (sizda: {have}).\n"
-                   f"Premium pulga sotilmaydi — faqat faollik uchun beriladi.")
+        kb.row(ib("🎁 Bonus olish", callback_data="m:daily", style=OK),
+               ib("💰 Balansim", callback_data="m:bal", style=MAIN))
+        return await bot.send_message(
+            chat_id, f"⭐ <b>PREMIUM FAOL</b>\n{DIV}\n"
+                     f"Tabriklaymiz! Siz Premium a'zosisiz.\n"
+                     f"💸 Barcha bonuslar <b>{mult}x</b> koeffitsiyent bilan hisoblanadi.",
+            reply_markup=kb.as_markup())
+    kb.row(ib("👥 Taklif qilish", callback_data="m:invite", style=OK))
+    await bot.send_message(
+        chat_id,
+        f"⭐ <b>PREMIUM</b>\n{DIV}\n"
+        f"💸 Taklif va kunlik bonuslar <b>{mult}x</b> ko'payadi.\n"
+        f"{THIN}\n"
+        f"🎯 Shart: <b>{need} ta</b> tasdiqlangan taklif\n"
+        f"📊 Sizda: <b>{have} ta</b>\n"
+        f"{bar(have / need * 100 if need else 100)}\n"
+        f"{DIV}\n"
+        f"<i>Premium pulga sotilmaydi — faqat faollik uchun beriladi.</i>",
+        reply_markup=kb.as_markup())
 
 
 # --- Yordam ---
@@ -629,36 +814,52 @@ async def help_msg(m: Message, state: FSMContext, bot: Bot):
 
 
 # --- Pul yechish ---
-async def withdraw_start(m: Message, state: FSMContext):
-    u = await get_user(m.from_user.id)
+async def withdraw_start(m: Message, state: FSMContext, uid: int | None = None):
+    uid = uid or m.from_user.id
+    u = await get_user(uid)
     mn = await gs("min_withdraw")
     if u["balance"] < mn:
-        return await m.answer(f"❌ Minimal yechish: <b>{fmt(mn)} so'm</b>.\nSizda: {fmt(u['balance'])} so'm.")
+        return await m.answer(f"❌ <b>Yechish uchun balans yetarli emas</b>\n{DIV}\n"
+                              f"🎯 Minimum: {money(mn)}\n"
+                              f"💰 Sizda: {money(u['balance'])}\n"
+                              f"{bar(u['balance'] / mn * 100 if mn else 100)}\n\n"
+                              f"<i>Do'st taklif qilib balansni to'ldiring!</i>")
     await state.set_state(W.amount)
-    await m.answer(f"💳 Yechmoqchi bo'lgan summani kiriting (so'm).\nMin: {fmt(mn)}, sizda: {fmt(u['balance'])}\n"
-                   f"Komissiya: {await gs('withdraw_fee_percent')}%\n(bekor qilish: /cancel)")
+    await m.answer(f"💳 <b>PUL YECHISH</b>\n{DIV}\n"
+                   f"💰 Balans: {money(u['balance'])}\n"
+                   f"🎯 Minimum: {money(mn)}\n"
+                   f"🧾 Komissiya: <b>{await gs('withdraw_fee_percent')}%</b>\n"
+                   f"{THIN}\n"
+                   f"Yechmoqchi bo'lgan summani raqamda yuboring:\n"
+                   f"<i>Masalan: 50000</i>\n\n"
+                   f"<i>Bekor qilish: /cancel</i>")
 
 
 @user.message(W.amount, F.text)
 async def w_amount(m: Message, state: FSMContext):
     txt = m.text.replace(" ", "")
     if not txt.isdigit():
-        return await m.answer("Faqat raqam kiriting (masalan: 50000). /cancel — bekor qilish")
+        return await m.answer("🔢 Faqat raqam kiriting (masalan: 50000).\n<i>/cancel — bekor qilish</i>")
     amt, u = int(txt), await get_user(m.from_user.id)
     if amt < await gs("min_withdraw"):
-        return await m.answer(f"Minimal summa: {fmt(await gs('min_withdraw'))} so'm")
+        return await m.answer(f"❌ Minimal summa: {money(await gs('min_withdraw'))}")
     if amt > u["balance"]:
-        return await m.answer("Balansingiz yetarli emas.")
+        return await m.answer(f"❌ Balansingiz yetarli emas.\nSizda: {money(u['balance'])}")
     used = (await q1("SELECT COALESCE(SUM(amount),0) s FROM withdrawals WHERE user_id=? AND status!='rejected' "
                      "AND created_at>?", (u["id"], now() - 86400)))["s"]
     if used + amt > await gs("max_withdraw_daily"):
-        return await m.answer(f"Kunlik limit: {fmt(await gs('max_withdraw_daily'))} so'm.")
+        return await m.answer(f"❌ Kunlik limit: {money(await gs('max_withdraw_daily'))}")
     await state.update_data(amount=amt)
     await state.set_state(W.method)
+    fee = amt * await gs("withdraw_fee_percent") // 100
     kb = InlineKeyboardBuilder()
     kb.row(ib("💳 Karta (Uzcard/Humo)", callback_data="wm:card", style=MAIN),
            ib("📱 Telefon puli", callback_data="wm:phone", style=OK))
-    await m.answer("To'lov usulini tanlang:", reply_markup=kb.as_markup())
+    await m.answer(f"🏦 <b>TO'LOV USULI</b>\n{DIV}\n"
+                   f"💰 Summa: {money(amt)}\n"
+                   f"🧾 Komissiya: {money(fee)} → olinadi: <b>{fmt(amt - fee)} so'm</b>\n"
+                   f"{THIN}\nUsulni tanlang:",
+                   reply_markup=kb.as_markup())
 
 
 @user.callback_query(W.method, F.data.startswith("wm:"))
@@ -666,8 +867,14 @@ async def w_method(c: CallbackQuery, state: FSMContext):
     method = c.data.split(":")[1]
     await state.update_data(method=method)
     await state.set_state(W.details)
-    await c.message.answer("Karta raqamini (16 xonali) kiriting:" if method == "card"
-                           else "Telefon raqamni kiriting (+998901234567):")
+    if method == "card":
+        await c.message.answer(f"💳 <b>Karta raqami</b>\n{DIV}\n"
+                               f"Uzcard (8600...) yoki Humo (9860...) — 16 xonali raqamni yuboring:\n"
+                               f"<i>Masalan: 8600123456789012</i>\n\n<i>Bekor qilish: /cancel</i>")
+    else:
+        await c.message.answer(f"📱 <b>Telefon raqami</b>\n{DIV}\n"
+                               f"Raqamni yuboring:\n"
+                               f"<i>Masalan: +998901234567</i>\n\n<i>Bekor qilish: /cancel</i>")
     await c.answer()
 
 
@@ -702,16 +909,29 @@ async def w_details(m: Message, state: FSMContext, bot: Bot):
                      (uid, -amt, "withdraw", now()))
     await db.commit()
     await state.clear()
-    await m.answer(f"✅ So'rov #{wid} qabul qilindi.\nTo'lanadi: <b>{fmt(amt - fee)} so'm</b>\n"
-                   f"Admin ko'rib chiqadi va sizga xabar beradi.", reply_markup=MENU)
+    await m.answer(f"✅ <b>SO'ROV QABUL QILINDI</b>\n{DIV}\n"
+                   f"🧾 So'rov raqami: <b>#{wid}</b>\n"
+                   f"💰 Summa: {money(amt)}\n"
+                   f"🧾 Komissiya: {money(fee)}\n"
+                   f"✅ To'lanadi: <b>{fmt(amt - fee)} so'm</b>\n"
+                   f"🏦 Rekvizit: <code>{details}</code>\n"
+                   f"{DIV}\n"
+                   f"<i>Admin 24 soat ichida ko'rib chiqadi va sizga xabar beradi.</i>",
+                   reply_markup=MENU)
     await notify_admins(bot, wd_text(wid, uid, amt, fee, data["method"], details, m.from_user.full_name),
                         roles=("owner", "accountant"), kb=wd_kb(wid))
 
 
 def wd_text(wid, uid, amt, fee, method, details, name):
-    return (f"💳 <b>Yechish so'rovi #{wid}</b>\nFoydalanuvchi: {esc(name)} (<code>{uid}</code>)\n"
-            f"Summa: {fmt(amt)} (komissiya {fmt(fee)}) → <b>{fmt(amt - fee)} so'm</b>\n"
-            f"Usul: {method}\nRekvizit: <code>{details}</code>")
+    return (f"💳 <b>YECHISH SO'ROVI #{wid}</b>\n{DIV}\n"
+            f"👤 {esc(name)}\n"
+            f"🆔 <code>{uid}</code>\n"
+            f"{THIN}\n"
+            f"💰 Summa: {money(amt)}\n"
+            f"🧾 Komissiya: {money(fee)}\n"
+            f"✅ Beriladi: <b>{fmt(amt - fee)} so'm</b>\n"
+            f"🏦 Usul: <b>{method}</b>\n"
+            f"💳 Rekvizit: <code>{details}</code>")
 
 
 def wd_kb(wid):
@@ -731,11 +951,26 @@ async def show(c: CallbackQuery, text, kb=None):
         await c.message.answer(text, reply_markup=kb.as_markup() if kb else None)
 
 
+async def admin_home_text(role, name):
+    total = (await q1("SELECT COUNT(*) c FROM users"))["c"]
+    pend = (await q1("SELECT COUNT(*) c FROM withdrawals WHERE status='pending'"))["c"]
+    t = datetime.now(UZ_TZ).strftime("%d.%m.%Y · %H:%M")
+    return (f"🔐 <b>ADMIN PANEL</b>\n{DIV}\n"
+            f"👤 {esc(name.split()[0] if name else 'Admin')} · <b>{role}</b>\n"
+            f"🕐 {t} <i>(Toshkent)</i>\n"
+            f"{THIN}\n"
+            f"👥 Foydalanuvchilar: <b>{fmt(total)}</b>\n"
+            f"⏳ Kutilayotgan so'rovlar: <b>{pend}</b>\n"
+            f"{DIV}\n"
+            f"Kerakli bo'limni tanlang 👇")
+
+
 def home_kb(role):
     kb = InlineKeyboardBuilder()
-    for key, title in SECTIONS:
-        if role in PERMS[key]:
-            kb.row(ib(title, callback_data=f"adm:{key}", style=SECTION_STYLE.get(key, MAIN)))
+    allowed = [(k, t) for k, t in SECTIONS if role in PERMS[k]]
+    for i in range(0, len(allowed), 2):
+        kb.row(*[ib(t, callback_data=f"adm:{k}", style=SECTION_STYLE.get(k, MAIN))
+                 for k, t in allowed[i:i + 2]])
     return kb
 
 
@@ -745,7 +980,7 @@ async def cmd_admin(m: Message, state: FSMContext):
     role = await role_of(m.from_user.id)
     if not role:
         return await m.answer("⛔ Sizda admin panelga ruxsat yo'q.")
-    await m.answer(f"🔐 <b>Admin panel</b> ({role})", reply_markup=home_kb(role).as_markup())
+    await m.answer(await admin_home_text(role, m.from_user.full_name), reply_markup=home_kb(role).as_markup())
 
 
 @admin.message(Command("reply"))
@@ -754,7 +989,7 @@ async def cmd_reply(m: Message, command: CommandObject, bot: Bot):
         return
     try:
         uid, text = (command.args or "").split(" ", 1)
-        await bot.send_message(int(uid), f"📩 <b>Admin javobi:</b>\n\n{esc(text)}")
+        await bot.send_message(int(uid), f"📩 <b>Admin javobi:</b>\n{DIV}\n{esc(text)}")
         await m.answer("✅ Yuborildi")
     except Exception:
         await m.answer("Format: /reply ID matn")
@@ -772,12 +1007,21 @@ async def dashboard_text():
     paid = (await n("SELECT COALESCE(SUM(amount-fee),0) s FROM withdrawals WHERE status='paid'"))["s"]
     pend = await n("SELECT COUNT(*) c, COALESCE(SUM(amount-fee),0) s FROM withdrawals WHERE status='pending'")
     debt = (await n("SELECT COALESCE(SUM(balance),0) s FROM users"))["s"]
-    return (f"📊 <b>Dashboard</b>\n\n👥 Jami: {fmt(total)} | Bugun: +{fmt(today)}\n"
-            f"✅ Obuna bo'lgan: {fmt(ver)} | Faol (3 kun): {fmt(active)}\n\n"
-            f"💵 Kirim (homiylardan): <b>{fmt(income)}</b> so'm\n💸 Chiqim (to'langan): <b>{fmt(paid)}</b> so'm\n"
-            f"📈 Foyda: <b>{fmt(income - paid)}</b> so'm\n"
-            f"🧾 Foydalanuvchilar balansi (qarz): {fmt(debt)} so'm\n"
-            f"⏳ Kutilayotgan yechish: {pend['c']} ta ({fmt(pend['s'])} so'm)")
+    conv = (ver / total * 100) if total else 0
+    return (f"📊 <b>DASHBOARD</b>\n{DIV}\n"
+            f"👥 <b>Foydalanuvchilar</b>\n"
+            f"├ Jami: <b>{fmt(total)}</b>\n"
+            f"├ Bugun qo'shildi: <b>+{fmt(today)}</b>\n"
+            f"├ Obunani tasdiqlagan: <b>{fmt(ver)}</b>\n"
+            f"├ Faol (3 kun): <b>{fmt(active)}</b>\n"
+            f"└ Konversiya: <b>{bar(conv, 8)}</b>\n"
+            f"{THIN}\n"
+            f"💵 <b>Moliya</b>\n"
+            f"├ Kirim (homiylar): {money(income)}\n"
+            f"├ To'langan: {money(paid)}\n"
+            f"├ Foyda: <b>{fmt(income - paid)} so'm</b>\n"
+            f"├ Foydalanuvchilar balansi: {money(debt)}\n"
+            f"└ ⏳ Kutilayotgan: <b>{pend['c']} ta</b> ({fmt(pend['s'])} so'm)")
 
 
 async def profit_calc():
@@ -785,23 +1029,28 @@ async def profit_calc():
     cost = await gs("start_bonus") + await gs("ref_l1") + await gs("ref_l2")
     p = s - cost
     warn = "\n⚠️ <b>DIQQAT: zarar!</b> Bonuslarni kamaytiring yoki homiy narxini oshiring." if p < 0 else ""
-    return (f"🧮 <b>Foyda kalkulyatori</b> (1 ta taklif qilingan foydalanuvchi)\nHomiylardan: {fmt(s)} so'm\n"
-            f"Bonuslar (start+1+2-daraja): {fmt(cost)} so'm\n<b>Foyda: {fmt(p)} so'm</b>{warn}")
+    return (f"🧮 <b>Foyda kalkulyatori</b>\n<i>1 ta taklif qilingan foydalanuvchi</i>\n{DIV}\n"
+            f"📥 Homiylardan: {money(s)}\n"
+            f"📤 Bonuslar (start + 1 + 2): {money(cost)}\n"
+            f"📈 <b>Foyda: {fmt(p)} so'm</b>{warn}")
 
 
 async def sponsors_view(c: CallbackQuery):
     kb = InlineKeyboardBuilder()
-    lines = ["📢 <b>Homiy kanallar</b>\n"]
     rows = await q("SELECT * FROM sponsors")
+    lines = [f"📢 <b>HOMIY KANALLAR</b>\n{DIV}"]
     if not rows:
-        lines.append("Hali kanal qo'shilmagan. Quyidagi tugma orqali qo'shing.")
+        lines.append("Hali kanal qo'shilmagan.\nQuyidagi tugma orqali qo'shing 👇")
     for s in rows:
         st = "🟢" if s["active"] else "🔴"
         lim = s["max_members"] or "∞"
-        lines.append(f"{st} #{s['id']} {esc(s['title'])} — {fmt(s['reward'])} so'm/kishi, {s['joined']}/{lim}")
-        kb.row(ib(f"🔁 #{s['id']} yoq/o'chir", callback_data=f"sp_t:{s['id']}", style=MAIN),
+        lines.append(f"{st} <b>#{s['id']}</b> {esc(s['title'])}\n"
+                     f"   ├ 💵 {fmt(s['reward'])} so'm/kishi\n"
+                     f"   └ 👥 {s['joined']}/{lim}")
+        kb.row(ib(f"🔁 #{s['id']} yoq/o'chirish", callback_data=f"sp_t:{s['id']}", style=MAIN),
                ib(f"🗑 #{s['id']} o'chirish", callback_data=f"sp_d:{s['id']}", style=BAD))
-    kb.row(ib("➕ Kanal qo'shish", callback_data="sp_add", style=OK))
+    kb.row(ib("➕ Kanal qo'shish", callback_data="sp_add", style=OK),
+           ib("🔄 Yangilash", callback_data="adm:sp", style=MAIN))
     kb.row(back_btn("home"))
     await show(c, "\n".join(lines), kb)
 
@@ -815,9 +1064,13 @@ async def adm_section(c: CallbackQuery, state: FSMContext, bot: Bot):
         return await c.answer("Ruxsat yo'q", show_alert=True)
     await c.answer()
     if sec == "home":
-        return await show(c, f"🔐 <b>Admin panel</b> ({role})", home_kb(role))
+        return await show(c, await admin_home_text(role, c.from_user.full_name), home_kb(role))
     if sec == "dash":
-        return await show(c, await dashboard_text(), back_kb())
+        kb = InlineKeyboardBuilder()
+        kb.row(ib("🔄 Yangilash", callback_data="adm:dash", style=MAIN),
+               ib("💳 So'rovlar", callback_data="adm:wd", style=BAD))
+        kb.row(back_btn("home"))
+        return await show(c, await dashboard_text(), kb)
     if sec in ("prices", "sec", "adm"):
         groups = {"prices": ("price",), "sec": ("limit",), "adm": ("sys", "text")}[sec]
         kb = InlineKeyboardBuilder()
@@ -826,35 +1079,62 @@ async def adm_section(c: CallbackQuery, state: FSMContext, bot: Bot):
                 val = await gs(key)
                 if g == "text":
                     kb.row(ib(f"✏️ {title}", callback_data=f"set:{key}:{sec}", style=MAIN))
+                elif key == "maintenance":
+                    st = "🟢 Yoqilgan" if val else "🔴 O'chiq"
+                    kb.row(ib(f"🛠 Texnik rejim: {st}", callback_data=f"set:{key}:{sec}",
+                              style=BAD if val else OK))
                 else:
-                    kb.row(ib(f"{title}: {val}", callback_data=f"set:{key}:{sec}", style=OK))
-        text = {"prices": "💰 <b>Narxlar va bonuslar</b>\nO'zgartirish uchun tugmani bosing.\n\n" + await profit_calc(),
-                "sec": "🛡 <b>Xavfsizlik</b>\n\n" + await security_text(),
-                "adm": "⚙️ <b>Sozlamalar</b>\nO'zgartirish uchun tugmani bosing."}[sec]
+                    kb.row(ib(f"{title.split(' (')[0]}: {val}", callback_data=f"set:{key}:{sec}", style=OK))
+        text = {"prices": f"💰 <b>NARXLAR VA BONUSLAR</b>\n{DIV}\n" + await profit_calc() +
+                          f"\n{THIN}\n📝 O'zgartirish uchun tugmani bosing.\n"
+                          f"<i>0 qiymati = o'chirilgan.</i>",
+                "sec": f"🛡 <b>XAVFSIZLIK</b>\n{DIV}\n" + await security_text(),
+                "adm": f"⚙️ <b>SOZLAMALAR</b>\n{DIV}\n"
+                       f"🛠 Texnik rejim, matnlar va adminlar boshqaruvi.\n"
+                       f"O'zgartirish uchun tugmani bosing."}[sec]
         if sec == "adm":
             kb.row(ib("👮 Adminlar boshqaruvi", callback_data="admlist", style=MAIN))
+        kb.row(ib("🔄 Yangilash", callback_data=f"adm:{sec}", style=MAIN))
         kb.row(back_btn("home"))
         return await show(c, text, kb)
     if sec == "wd":
-        pend = (await q1("SELECT COUNT(*) c FROM withdrawals WHERE status='pending'"))["c"]
+        pend = await q1("SELECT COUNT(*) c, COALESCE(SUM(amount-fee),0) s FROM withdrawals WHERE status='pending'")
+        today_wd = (await q1("SELECT COUNT(*) c FROM withdrawals WHERE created_at>?",
+                             (now() - 86400,)))["c"]
         kb = InlineKeyboardBuilder()
-        kb.row(ib(f"⏳ Kutilayotganlar ({pend})", callback_data="wdl:pending", style=MAIN))
+        kb.row(ib(f"⏳ Kutilayotganlar ({pend['c']})", callback_data="wdl:pending", style=BAD))
         kb.row(ib("✅ To'langanlar", callback_data="wdl:paid", style=OK),
-               ib("❌ Rad etilganlar", callback_data="wdl:rejected", style=BAD))
+               ib("❌ Rad etilganlar", callback_data="wdl:rejected", style=MAIN))
+        kb.row(ib("🔄 Yangilash", callback_data="adm:wd", style=MAIN))
         kb.row(back_btn("home"))
-        return await show(c, "💳 <b>Yechish so'rovlari</b>\nMin/max/komissiya: «Narxlar» bo'limida.", kb)
+        return await show(c,
+                          f"💳 <b>YECHISH SO'ROVLARI</b>\n{DIV}\n"
+                          f"⏳ Kutilayotgan: <b>{pend['c']} ta</b> ({fmt(pend['s'])} so'm)\n"
+                          f"🕐 Oxirgi 24 soatda: <b>{today_wd} ta</b>\n"
+                          f"{THIN}\n"
+                          f"<i>Min/max/komissiya: «Narxlar» bo'limida.</i>",
+                          kb)
     if sec == "sp":
         return await sponsors_view(c)
     if sec == "users":
         await state.set_state(A.user_search)
-        return await show(c, "👥 Foydalanuvchi ID yoki @username ni yuboring:\n(bekor qilish: /cancel)", back_kb())
+        return await show(c,
+                          f"👥 <b>FOYDALANUVCHILAR</b>\n{DIV}\n"
+                          f"🔍 ID, @username yoki telefon raqamni yuboring.\n"
+                          f"{THIN}\n"
+                          f"<i>Misol: 8567272412 yoki @username</i>\n"
+                          f"<i>Bekor qilish: /cancel</i>", back_kb())
     if sec == "bc":
         kb = InlineKeyboardBuilder()
-        kb.row(ib("🌍 Hammaga", callback_data="bc:all", style=MAIN),
-               ib("✅ Faollarga", callback_data="bc:active", style=OK),
-               ib("⭐ Premiumga", callback_data="bc:premium", style=MAIN))
+        total = (await q1("SELECT COUNT(*) c FROM users WHERE is_banned=0"))["c"]
+        act = (await q1("SELECT COUNT(*) c FROM users WHERE is_banned=0 AND last_daily>=?",
+                        ((today_local() - timedelta(days=3)).isoformat(),)))["c"]
+        prem = (await q1("SELECT COUNT(*) c FROM users WHERE is_banned=0 AND is_premium=1"))["c"]
+        kb.row(ib(f"🌍 Hammaga ({total})", callback_data="bc:all", style=MAIN))
+        kb.row(ib(f"✅ Faollarga ({act})", callback_data="bc:active", style=OK),
+               ib(f"⭐ Premiumga ({prem})", callback_data="bc:premium", style=MAIN))
         kb.row(back_btn("home"))
-        return await show(c, "📣 <b>Xabar yuborish</b>\nKimga yuboramiz?", kb)
+        return await show(c, f"📣 <b>XABAR YUBORISH</b>\n{DIV}\nKimga yuboramiz?", kb)
     if sec == "rep":
         d7 = now() - 7 * 86400
         new = (await q1("SELECT COUNT(*) c FROM users WHERE created_at>?", (d7,)))["c"]
@@ -865,14 +1145,19 @@ async def adm_section(c: CallbackQuery, state: FSMContext, bot: Bot):
                       "ORDER BY c DESC LIMIT 5")
         sp = await q("SELECT s.title, COALESCE(SUM(i.amount),0) s FROM sponsors s LEFT JOIN income i "
                      "ON i.sponsor_id=s.id GROUP BY s.id")
-        text = (f"📈 <b>Hisobot (7 kun)</b>\nYangi: {new}\nKirim: {fmt(inc)}\nTo'langan: {fmt(paid)}\n"
-                f"Foyda: {fmt(inc - paid)}\n\n<b>Homiylar bo'yicha:</b>\n" +
-                ("\n".join(f"• {esc(r['title'])}: {fmt(r['s'])} so'm" for r in sp) or "—") +
-                "\n\n<b>Eng faol referrerlar:</b>\n" +
-                ("\n".join(f"• <code>{r['inviter_id']}</code>: {r['c']}" for r in top) or "—"))
+        text = (f"📈 <b>HISOBOT — 7 KUN</b>\n{DIV}\n"
+                f"👥 Yangi: <b>{fmt(new)}</b>\n"
+                f"💵 Kirim: {money(inc)}\n"
+                f"💸 To'langan: {money(paid)}\n"
+                f"📊 Foyda: <b>{fmt(inc - paid)} so'm</b>\n"
+                f"{THIN}\n<b>📢 Homiylar bo'yicha:</b>\n" +
+                ("\n".join(f"├ {esc(r['title'])}: {fmt(r['s'])} so'm" for r in sp) or "—") +
+                f"\n{THIN}\n<b>🏆 Eng faol referrerlar:</b>\n" +
+                ("\n".join(f"├ <code>{r['inviter_id']}</code>: {r['c']} ta" for r in top) or "—"))
         kb = InlineKeyboardBuilder()
         kb.row(ib("📥 Foydalanuvchilar CSV", callback_data="csv:users", style=MAIN),
                ib("📥 To'lovlar CSV", callback_data="csv:wd", style=MAIN))
+        kb.row(ib("🔄 Yangilash", callback_data="adm:rep", style=OK))
         kb.row(back_btn("home"))
         return await show(c, text, kb)
 
@@ -882,11 +1167,13 @@ async def security_text():
     rev = await q("SELECT inviter_id, COUNT(*) n FROM referrals WHERE status='revoked' GROUP BY inviter_id "
                   "HAVING n>=3 ORDER BY n DESC LIMIT 10")
     lim = (await q1("SELECT COUNT(*) c FROM referrals WHERE status='limited'"))["c"]
-    t = f"Limitga tushgan takliflar: {lim}\n\n<b>Bir rekvizitda ko'p akkaunt:</b>\n"
-    t += "\n".join(f"• <code>{esc(r['details'])}</code> ({r['n']} ta)" for r in cards) or "—"
-    t += "\n\n<b>Obunadan chiqqan ko'p taklif (≥3):</b>\n"
-    t += "\n".join(f"• <code>{r['inviter_id']}</code>: {r['n']} ta" for r in rev) or "—"
+    t = (f"📉 Limitga tushgan takliflar: <b>{lim}</b>\n"
+         f"{THIN}\n<b>💳 Bir rekvizitda ko'p akkaunt:</b>\n")
+    t += "\n".join(f"├ <code>{esc(r['details'])}</code> — {r['n']} ta" for r in cards) or "├ Xavfli holat yo'q ✅"
+    t += f"\n{THIN}\n<b>↩️ Obunadan chiqqan ko'p taklif (≥3):</b>\n"
+    t += "\n".join(f"├ <code>{r['inviter_id']}</code> — {r['n']} ta" for r in rev) or "├ Xavfli holat yo'q ✅"
     return t
+
 
 
 # --- Sozlamani tahrirlash ---
@@ -903,8 +1190,14 @@ async def set_start(c: CallbackQuery, state: FSMContext):
     await state.set_state(A.val)
     await state.update_data(key=key, back=back)
     cur = await gs(key)
-    await c.message.answer(f"<b>{SETTINGS[key][1]}</b>\nHozirgi qiymat: <code>{esc(cur)}</code>\n\n"
-                           f"Yangi qiymatni yuboring:\n(bekor qilish: /cancel)")
+    hint = ("Matn yoki HTML yuboring" if SETTINGS[key][2] == "text"
+            else "Faqat butun son yuboring (0 = o'chirilgan)")
+    await c.message.answer(f"⚙️ <b>SOZLAMANI O'ZGARTIRISH</b>\n{DIV}\n"
+                           f"📝 {esc(SETTINGS[key][1])}\n"
+                           f"📌 Hozirgi qiymat: <code>{esc(cur)}</code>\n"
+                           f"{THIN}\n"
+                           f"{hint}:\n\n"
+                           f"<i>Bekor qilish: /cancel</i>")
     await c.answer()
 
 
@@ -916,14 +1209,20 @@ async def set_value(m: Message, state: FSMContext):
     val = m.html_text if isinstance(default, str) else m.text.replace(" ", "")
     if isinstance(default, int):
         if not val.isdigit():
-            return await m.answer("Faqat musbat butun son kiriting.")
+            return await m.answer("🔢 Faqat musbat butun son kiriting.\n<i>Bekor qilish: /cancel</i>")
         val = int(val)
     old = await gs(key)
     await set_setting(key, val)
     await state.clear()
     await notify_admins(m.bot, f"🧾 {esc(m.from_user.full_name)} o'zgartirdi: {SETTINGS[key][1]}: "
                                f"{esc(str(old)[:40])} → {esc(str(val)[:40])}", roles=("owner",))
-    await m.answer("✅ Saqlandi (darrov amal qiladi).", reply_markup=back_kb(data["back"]).as_markup())
+    await m.answer(f"✅ <b>SAQLANDI</b>\n{DIV}\n"
+                   f"📝 {esc(SETTINGS[key][1])}\n"
+                   f"🗂 Avval: <code>{esc(str(old)[:60])}</code>\n"
+                   f"🆕 Endi: <code>{esc(str(val)[:60])}</code>\n"
+                   f"{THIN}\n"
+                   f"<i>Yangi qiymat darrov amal qiladi.</i>",
+                   reply_markup=back_kb(data["back"]).as_markup())
 
 
 # --- Yechish so'rovlari ---
@@ -938,11 +1237,16 @@ async def wd_list(c: CallbackQuery):
                    "WHERE w.status=? ORDER BY w.id DESC LIMIT 10", (st,))
     await c.answer()
     if not rows:
-        return await c.message.answer("Ro'yxat bo'sh.")
+        labels = {"pending": "⏳ Kutilayotgan", "paid": "✅ To'langan", "rejected": "❌ Rad etilgan"}
+        kb = InlineKeyboardBuilder()
+        kb.row(back_btn("wd"))
+        return await c.message.answer(f"{labels[st]} so'rovlar yo'q.\n{DIV}\n"
+                                      f"<i>Hozircha bu bo'limda hech narsa yo'q.</i>",
+                                      reply_markup=kb.as_markup())
     for w in rows:
         txt = wd_text(w["id"], w["user_id"], w["amount"], w["fee"], w["method"], w["details"], w["full_name"])
         if st == "rejected":
-            txt += f"\nSabab: {esc(w['reason'])}"
+            txt += f"\n{THIN}\n❌ Sabab: {esc(w['reason'])}"
         await c.message.answer(txt, reply_markup=wd_kb(w["id"]) if st == "pending" else None)
 
 
@@ -957,12 +1261,18 @@ async def wd_ok(c: CallbackQuery, bot: Bot):
         return await c.answer("Allaqachon ko'rib chiqilgan", show_alert=True)
     w = await q1("SELECT * FROM withdrawals WHERE id=?", (wid,))
     await ex("UPDATE users SET total_withdrawn=total_withdrawn+? WHERE id=?", (w["amount"], w["user_id"]))
-    await safe_send(bot, w["user_id"], f"✅ So'rov #{wid} to'landi: <b>{fmt(w['amount'] - w['fee'])} so'm</b>")
+    await safe_send(bot, w["user_id"],
+                    f"✅ <b>TO'LOV AMALGA OSHIRILDI</b>\n{DIV}\n"
+                    f"🧾 So'rov: <b>#{wid}</b>\n"
+                    f"💰 Hisobingizga: <b>{fmt(w['amount'] - w['fee'])} so'm</b>\n"
+                    f"{THIN}\n<i>Yana do'st taklif qilib daromadni oshiring!</i>")
     try:
-        await c.message.edit_text(c.message.html_text + f"\n\n✅ To'landi ({esc(c.from_user.full_name)})")
+        await c.message.edit_text(c.message.html_text +
+                                 f"\n{DIV}\n✅ <b>TO'LANDI</b> · {esc(c.from_user.full_name)}",
+                                 reply_markup=None)
     except TelegramBadRequest:
         pass
-    await c.answer("Bajarildi")
+    await c.answer("✅ To'landi deb belgilandi")
 
 
 @admin.callback_query(F.data.startswith("wd_no:"))
@@ -971,7 +1281,10 @@ async def wd_no(c: CallbackQuery, state: FSMContext):
         return await c.answer("Ruxsat yo'q", show_alert=True)
     await state.set_state(A.reject)
     await state.update_data(wid=int(c.data.split(":")[1]))
-    await c.message.answer("Rad etish sababini yozing (bekor qilish: /cancel):")
+    await c.message.answer(f"❌ <b>RAD ETISH</b>\n{DIV}\n"
+                           f"Sababni yozing — foydalanuvchiga ko'rsatiladi\n"
+                           f"va summa balansiga qaytariladi.\n\n"
+                           f"<i>Bekor qilish: /cancel</i>")
     await c.answer()
 
 
@@ -985,9 +1298,15 @@ async def wd_reject(m: Message, state: FSMContext, bot: Bot):
         return await m.answer("Allaqachon ko'rib chiqilgan.")
     w = await q1("SELECT * FROM withdrawals WHERE id=?", (wid,))
     await add_balance(w["user_id"], w["amount"], "refund", earn=False)
-    await safe_send(bot, w["user_id"], f"❌ So'rov #{wid} rad etildi.\nSabab: {esc(m.text)}\n"
-                                       f"Summa balansga qaytarildi.")
-    await m.answer(f"❌ #{wid} rad etildi, pul foydalanuvchiga qaytarildi.")
+    await safe_send(bot, w["user_id"],
+                    f"❌ <b>SO'ROV RAD ETILDI</b>\n{DIV}\n"
+                    f"🧾 So'rov: <b>#{wid}</b>\n"
+                    f"💰 Summa: <b>{fmt(w['amount'])} so'm</b> — balansga qaytarildi\n"
+                    f"{THIN}\n📄 Sabab: {esc(m.text)}\n\n"
+                    f"<i>Savollar bo'lsa /start → 🆘 Yordam orqali yozing.</i>")
+    await m.answer(f"❌ <b>#{wid} rad etildi</b>\n{DIV}\n"
+                   f"💰 {fmt(w['amount'])} so'm foydalanuvchi balansiga qaytarildi.",
+                   reply_markup=back_kb("wd").as_markup())
 
 
 # --- Homiylar (sponsors) ---
@@ -1014,9 +1333,15 @@ async def sp_add(c: CallbackQuery, state: FSMContext):
     if await role_of(c.from_user.id) != "owner":
         return await c.answer("Ruxsat yo'q", show_alert=True)
     await state.set_state(A.sponsor)
-    await c.message.answer("Kanalni quyidagi formatda yuboring:\n<code>@kanal_username 600 1000</code>\n"
-                           "(kanal, 1 obunachi uchun sizga to'lanadigan so'm, limit; 0 = cheksiz)\n"
-                           "⚠️ Bot kanalda ADMIN bo'lishi shart.\n(bekor qilish: /cancel)")
+    await c.message.answer(f"➕ <b>KANAL QO'SHISH</b>\n{DIV}\n"
+                           f"Format:\n<code>@kanal_username 600 1000</code>\n"
+                           f"{THIN}\n"
+                           f"1️⃣ Kanal (username yoki -100... ID)\n"
+                           f"2️⃣ 1 obunachi uchun sizga tushadigan so'm\n"
+                           f"3️⃣ Obunachi limiti (0 = cheksiz)\n"
+                           f"{DIV}\n"
+                           f"⚠️ <b>Bot kanalda admin bo'lishi shart!</b>\n"
+                           f"<i>Bekor qilish: /cancel</i>")
     await c.answer()
 
 
@@ -1031,11 +1356,19 @@ async def sp_save(m: Message, state: FSMContext, bot: Bot):
         await ex("INSERT INTO sponsors(channel_id,link,title,reward,max_members) VALUES(?,?,?,?,?)",
                  (chat.id, link, chat.title, int(reward), int(limit)))
     except ValueError:
-        return await m.answer("❌ Narx va limit faqat son bo'lishi kerak. Masalan: <code>@kanal 600 1000</code>")
+        return await m.answer("❌ Narx va limit faqat son bo'lishi kerak.\n"
+                              "Misol: <code>@kanal 600 1000</code>")
     except Exception as e:
-        return await m.answer(f"❌ Xato: {esc(e)}\nFormat va bot kanalda admin ekanini tekshiring.")
+        return await m.answer(f"❌ <b>Xato:</b> {esc(e)}\n{DIV}\n"
+                              f"Formatni va bot kanalda admin ekanini tekshiring.")
     await state.clear()
-    await m.answer(f"✅ Qo'shildi: {esc(chat.title)}", reply_markup=back_kb("sp").as_markup())
+    await m.answer(f"✅ <b>KANAL QO'SHILDI</b>\n{DIV}\n"
+                   f"📢 {esc(chat.title)}\n"
+                   f"🆔 <code>{chat.id}</code>\n"
+                   f"💵 {fmt(int(reward))} so'm / obunachi\n"
+                   f"👥 Limit: {int(limit) or '∞'}\n"
+                   f"{THIN}\n<i>Endi foydalanuvchilar obuna bo'lishi shart.</i>",
+                   reply_markup=back_kb("sp").as_markup())
 
 
 # --- Foydalanuvchilar ---
@@ -1044,18 +1377,28 @@ async def user_card(uid):
     if not u:
         return None, None
     refs = (await q1("SELECT COUNT(*) c FROM referrals WHERE inviter_id=? AND status='confirmed'", (uid,)))["c"]
-    text = (f"👤 <b>{esc(u['full_name'])}</b>" + (f" @{esc(u['username'])}" if u["username"] else "") + "\n"
-            f"ID: <code>{uid}</code>\n"
-            f"Telefon: {esc(u['phone']) if u['phone'] else '—'}\n"
-            f"Balans: <b>{fmt(u['balance'])}</b> | Topilgan: {fmt(u['total_earned'])} | "
-            f"Yechilgan: {fmt(u['total_withdrawn'])}\nTakliflar: {refs} | Taklif qilgan: {u['referrer_id'] or '—'}\n"
-            f"Premium: {'ha' if u['is_premium'] else 'yo‘q'} | Bloklangan: {'ha' if u['is_banned'] else 'yo‘q'}")
+    text = (f"👤 <b>FOYDALANUVCHI KARTOCHKASI</b>\n{DIV}\n"
+            f"🧑 <b>{esc(u['full_name'])}</b>"
+            + (f" · @{esc(u['username'])}" if u["username"] else "") + "\n"
+            f"🆔 <code>{uid}</code>\n"
+            f"📱 {esc(u['phone']) if u['phone'] else '—'}\n"
+            f"{THIN}\n"
+            f"💰 Balans: <b>{fmt(u['balance'])} so'm</b>\n"
+            f"📈 Topilgan: {money(u['total_earned'])}\n"
+            f"📉 Yechilgan: {money(u['total_withdrawn'])}\n"
+            f"{THIN}\n"
+            f"👥 Tasdiqlangan takliflar: <b>{refs} ta</b>\n"
+            f"🔗 Taklif qilgan: <code>{u['referrer_id'] or '—'}</code>\n"
+            f"⭐ Premium: <b>{'ha' if u['is_premium'] else 'yo‘q'}</b>\n"
+            f"🚫 Bloklangan: <b>{'ha' if u['is_banned'] else 'yo‘q'}</b>\n"
+            f"🔥 Streak: <b>{u['streak']} kun</b>")
     kb = InlineKeyboardBuilder()
     kb.row(ib("✅ Blokdan chiqarish" if u["is_banned"] else "🚫 Bloklash",
               callback_data=f"u:ban:{uid}", style=OK if u["is_banned"] else BAD),
            ib("⭐ Premium", callback_data=f"u:prem:{uid}", style=MAIN))
     kb.row(ib("💰 Balansni o'zgartirish", callback_data=f"u:bal:{uid}", style=OK),
            ib("🌳 Referral daraxti", callback_data=f"u:tree:{uid}", style=MAIN))
+    kb.row(ib("🔄 Yangilash", callback_data=f"u:ref:{uid}", style=MAIN))
     kb.row(back_btn("home"))
     return text, kb
 
@@ -1087,17 +1430,32 @@ async def user_actions(c: CallbackQuery, state: FSMContext):
     elif act == "prem":
         await ex("UPDATE users SET is_premium=1-is_premium WHERE id=?", (uid,))
     elif act == "bal":
+        u = await get_user(uid)
+        if not u:
+            return await c.answer("Foydalanuvchi topilmadi", show_alert=True)
         await state.set_state(A.user_bal)
         await state.update_data(uid=uid)
-        await c.message.answer("Format: <code>+500 sabab</code> yoki <code>-300 sabab</code>\n"
-                               "(sabab majburiy, bekor qilish: /cancel)")
+        await c.message.answer(f"💰 <b>BALANSNI O'ZGARTIRISH</b>\n{DIV}\n"
+                               f"👤 {esc(u['full_name'])[:25]} · <code>{uid}</code>\n"
+                               f"💳 Hozirgi balans: <b>{fmt(u['balance'])} so'm</b>\n"
+                               f"{THIN}\n"
+                               f"Format: <code>+500 sabab</code> yoki <code>-300 sabab</code>\n"
+                               f"<i>Sabab majburiy. Bekor qilish: /cancel</i>")
         return await c.answer()
     elif act == "tree":
-        rows = await q("SELECT r.invited_id, r.status, u.full_name FROM referrals r JOIN users u ON u.id=r.invited_id "
-                       "WHERE r.inviter_id=? ORDER BY r.created_at DESC LIMIT 20", (uid,))
-        await c.message.answer("🌳 <b>Takliflari (oxirgi 20):</b>\n" + (
-            "\n".join(f"• {esc(r['full_name'])} (<code>{r['invited_id']}</code>) — {r['status']}" for r in rows) or "—"))
+        rows = await q("SELECT r.invited_id, r.status, r.created_at, u.full_name FROM referrals r "
+                       "JOIN users u ON u.id=r.invited_id WHERE r.inviter_id=? "
+                       "ORDER BY r.created_at DESC LIMIT 20", (uid,))
+        icons = {"confirmed": "✅", "pending": "⏳", "revoked": "↩️", "limited": "🚫"}
+        body = "\n".join(f"{icons.get(r['status'], '•')} {esc(r['full_name'])[:22]} "
+                         f"(<code>{r['invited_id']}</code>)" for r in rows)
+        await c.message.answer(f"🌳 <b>REFERRAL DARAXTI</b>\n{DIV}\n"
+                               f"👤 <code>{uid}</code>\n{THIN}\n"
+                               f"{body or 'Takliflar yo‘q'}",
+                               reply_markup=back_kb("home").as_markup())
         return await c.answer()
+    elif act == "ref":
+        pass
     else:
         return await c.answer("Noma'lum amal", show_alert=True)
     text, kb = await user_card(uid)
@@ -1110,7 +1468,7 @@ async def user_actions(c: CallbackQuery, state: FSMContext):
 async def user_bal(m: Message, state: FSMContext, bot: Bot):
     mt = re.match(r"^([+-]?\d+)\s+(.+)$", m.text.strip())
     if not mt:
-        return await m.answer("Format: +500 sabab")
+        return await m.answer("🔢 Format: <code>+500 sabab</code>\n<i>Bekor qilish: /cancel</i>")
     uid = (await state.get_data())["uid"]
     amt = int(mt.group(1))
     u = await get_user(uid)
@@ -1119,10 +1477,18 @@ async def user_bal(m: Message, state: FSMContext, bot: Bot):
         return await m.answer("Foydalanuvchi topilmadi.")
     await add_balance(uid, amt, "admin", earn=False)
     await state.clear()
-    await notify_admins(bot, f"🧾 {esc(m.from_user.full_name)}: <code>{uid}</code> balansi {amt:+d} ({esc(mt.group(2))})",
-                        roles=("owner",))
-    await safe_send(bot, uid, f"ℹ️ Balansingiz admin tomonidan o'zgartirildi: {amt:+d} so'm")
-    await m.answer("✅ Bajarildi")
+    await notify_admins(m.bot, f"🧾 {esc(m.from_user.full_name)}: <code>{uid}</code> balansi "
+                               f"{amt:+d} ({esc(mt.group(2))})", roles=("owner",))
+    await safe_send(m.bot, uid,
+                    f"ℹ️ <b>BALANS O'ZGARTIRILDI</b>\n{DIV}\n"
+                    f"{'➕' if amt > 0 else '➖'} <b>{fmt(abs(amt))} so'm</b>\n"
+                    f"{THIN}\n📄 Sabab: {esc(mt.group(2))}\n"
+                    f"💳 Yangi balans: <b>{fmt(u['balance'] + amt)} so'm</b>")
+    await m.answer(f"✅ <b>BAJARILDI</b>\n{DIV}\n"
+                   f"👤 <code>{uid}</code>\n"
+                   f"{'➕' if amt > 0 else '➖'} {fmt(abs(amt))} so'm\n"
+                   f"💳 Yangi balans: <b>{fmt(u['balance'] + amt)} so'm</b>",
+                   reply_markup=back_kb("home").as_markup())
 
 
 # --- Xabar yuborish ---
@@ -1135,8 +1501,14 @@ async def bc_start(c: CallbackQuery, state: FSMContext):
         return await c.answer("Noto'g'ri auditoriya", show_alert=True)
     await state.set_state(A.bc_msg)
     await state.update_data(aud=aud)
-    await c.message.answer("Yuboriladigan xabarni jo'nating (matn, rasm, tugma bilan — hammasi bo'ladi).\n"
-                           "Bekor qilish: /cancel")
+    aud_name = {"all": "🌍 Barcha foydalanuvchilar", "active": "✅ Faollar (3 kun)",
+                "premium": "⭐ Premium a'zolar"}[aud]
+    await c.message.answer(f"📣 <b>XABAR YUBORISH</b>\n{DIV}\n"
+                           f"🎯 Auditoriya: {aud_name}\n"
+                           f"{THIN}\n"
+                           f"Yuboriladigan xabarni jo'nating.\n"
+                           f"<i>Matn, rasm, video, tugma — hammasi bo'ladi.</i>\n\n"
+                           f"<i>Bekor qilish: /cancel</i>")
     await c.answer()
 
 
@@ -1150,7 +1522,12 @@ async def bc_msg(m: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.row(ib(f"✅ Yuborish ({n} ta)", callback_data="bcgo", style=OK),
            ib("❌ Bekor", callback_data="adm:home", style=BAD))
-    await m.answer("Yuborishni tasdiqlaysizmi?", reply_markup=kb.as_markup())
+    await m.answer(f"📣 <b>TASDIQLASH</b>\n{DIV}\n"
+                   f"👥 Qabul qiluvchilar: <b>{fmt(n)} ta</b>\n"
+                   f"{THIN}\n"
+                   f"Yuborishni tasdiqlaysizmi?\n"
+                   f"<i>Bekor qilsangiz hech kimga yuborilmaydi.</i>",
+                   reply_markup=kb.as_markup())
 
 
 @admin.callback_query(F.data == "bcgo")
@@ -1162,7 +1539,8 @@ async def bc_go(c: CallbackQuery, state: FSMContext, bot: Bot):
     if await role_of(c.from_user.id) not in PERMS["bc"]:
         return await c.answer("Ruxsat yo'q", show_alert=True)
     try:
-        await c.message.edit_text("📣 Yuborish boshlandi...")
+        await c.message.edit_text(f"📣 <b>Yuborish boshlandi...</b>\n{DIV}\n"
+                                  f"<i>Har bir foydalanuvchiga yuborilmoqda, iltimos kuting.</i>")
     except TelegramBadRequest:
         pass
 
@@ -1176,7 +1554,12 @@ async def bc_go(c: CallbackQuery, state: FSMContext, bot: Bot):
             except Exception:
                 pass
             await asyncio.sleep(0.05)
-        await safe_send(bot, c.from_user.id, f"📣 Yuborildi: {ok}/{len(ids)}")
+        await safe_send(bot, c.from_user.id,
+                        f"📣 <b>XABAR YUBORILDI</b>\n{DIV}\n"
+                        f"✅ Yetkazildi: <b>{fmt(ok)}</b>\n"
+                        f"👥 Jami: <b>{fmt(len(ids))}</b>\n"
+                        f"{THIN}\n"
+                        f"<i>Bloklagan foydalanuvchilarga yetib bormadi.</i>")
     asyncio.create_task(run())
 
 
@@ -1208,12 +1591,25 @@ async def adm_list(c: CallbackQuery):
     if await role_of(c.from_user.id) != "owner":
         return await c.answer("Ruxsat yo'q", show_alert=True)
     kb = InlineKeyboardBuilder()
-    for a in await q("SELECT * FROM admins"):
-        kb.row(ib(f"🗑 {a['user_id']} ({a['role']})", callback_data=f"admdel:{a['user_id']}", style=BAD))
+    admins = await q("SELECT * FROM admins ORDER BY role, user_id")
+    for a in admins:
+        u = await get_user(a["user_id"])
+        nm = esc(u["full_name"])[:18] if u else "—"
+        kb.row(ib(f"🗑 {nm} · {a['role']}", callback_data=f"admdel:{a['user_id']}", style=BAD))
     kb.row(ib("➕ Admin qo'shish", callback_data="admadd", style=OK))
     kb.row(back_btn("adm"))
-    await show(c, "👮 <b>Adminlar</b>\nRollar: owner, moderator, accountant (hisobchi)\n\n"
-                  f"Ega (owner, .env): <code>{OWNER_ID}</code>", kb)
+    body = "\n".join(f"├ <code>{a['user_id']}</code> · <b>{a['role']}</b>" for a in admins) or "├ Qo'shimcha admin yo'q"
+    await show(c, f"👮 <b>ADMINLAR BOSHQARUVI</b>\n{DIV}\n"
+                  f"👑 Ega (owner): <code>{OWNER_ID}</code>\n"
+                  f"{THIN}\n"
+                  f"<b>Qo'shilgan adminlar:</b>\n{body}\n"
+                  f"{DIV}\n"
+                  f"🔑 Rollar:\n"
+                  f"├ <b>owner</b> — to'liq huquq\n"
+                  f"├ <b>moderator</b> — foydalanuvchi/xabar\n"
+                  f"└ <b>accountant</b> — to'lov/hisobot\n"
+                  f"{THIN}\n"
+                  f"🗑 Tugmani bosib adminni o'chirasiz.", kb)
     await c.answer()
 
 
@@ -1234,8 +1630,12 @@ async def adm_add(c: CallbackQuery, state: FSMContext):
     if await role_of(c.from_user.id) != "owner":
         return await c.answer("Ruxsat yo'q", show_alert=True)
     await state.set_state(A.admin_add)
-    await c.message.answer("Format: <code>123456789 moderator</code>\n"
-                           "Rollar: owner, moderator, accountant\n(bekor qilish: /cancel)")
+    await c.message.answer(f"➕ <b>ADMIN QO'SHISH</b>\n{DIV}\n"
+                           f"Format: <code>123456789 moderator</code>\n"
+                           f"{THIN}\n"
+                           f"🔑 Rollar: <code>owner</code>, <code>moderator</code>, "
+                           f"<code>accountant</code>\n\n"
+                           f"<i>Bekor qilish: /cancel</i>")
     await c.answer()
 
 
@@ -1247,9 +1647,14 @@ async def adm_save(m: Message, state: FSMContext):
         int(uid)
         await ex("INSERT OR REPLACE INTO admins(user_id,role) VALUES(?,?)", (int(uid), role))
     except Exception:
-        return await m.answer("❌ Format noto'g'ri. Masalan: <code>123456789 moderator</code>")
+        return await m.answer("❌ Format noto'g'ri.\nMisol: <code>123456789 moderator</code>\n"
+                              "<i>Bekor qilish: /cancel</i>")
     await state.clear()
-    await m.answer("✅ Qo'shildi", reply_markup=back_kb("adm").as_markup())
+    await m.answer(f"✅ <b>ADMIN QO'SHILDI</b>\n{DIV}\n"
+                   f"🆔 <code>{uid}</code>\n"
+                   f"🔑 Rol: <b>{role}</b>\n"
+                   f"{THIN}\n<i>U /admin buyrug'i orqali kirishi mumkin.</i>",
+                   reply_markup=back_kb("adm").as_markup())
 
 
 # ----------------------------------------------------------------------------
