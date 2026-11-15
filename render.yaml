@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: pulbot
+    runtime: python
+    plan: free
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: python PulBot.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: BOT_TOKEN
+        sync: false   # Render panelida qo'lda kiritasiz (@BotFather beradi)
+      - key: OWNER_ID
+        sync: false   # Sizning Telegram ID raqamingiz (@userinfobot dan oling)
+      - key: DB_PATH
+        value: bot.db
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+# Eslatma: bepul rejimda fayl tizimi vaqtinchalik — bot.db har deployda tozalanadi.
+# Bazani saqlash uchun Render'da "Disks" (Persistent Disk) ochib, quyidagilarni qo'shing:
+#   disk:
+#     name: pulbot-data
+#     mountPath: /var/data
+# va DB_PATH ni /var/data/bot.db ga o'zgartiring. Disklar pullik turda bo'ladi.
