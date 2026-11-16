@@ -15,6 +15,7 @@ broadcast, CSV eksport). Barcha inline va oddiy tugmalar **rangli** (yashil/qizi
 | `PulBot.py` | Botning o'zi |
 | `requirements.txt` | Kerakli kutubxonalar |
 | `render.yaml` | Render Blueprint (avtomatik konfiguratsiya) |
+| `.github/workflows/keepalive.yml` | 24/7 keep-alive: har 5 daqiqada `/health` ni ping qiladi |
 
 ## Lokal sinov
 
@@ -57,8 +58,15 @@ python PulBot.py
 
 ## Muhim eslatmalar
 
-- **Bepul plan uxlab qoladi**: 15 daqiqa trafiksiz Render bepul service'ni to'xtatadi. Botni doimiy uyg'oq saqlash uchun [UptimeRobot](https://uptimerobot.com) da `https://<service>.onrender.com/health` manzilini har 5 daqiqada ping qiluvchi monitor yarating (ixtiyoriy).
-- **SQLite bepul rejimda vaqtinchalik**: har redeploy'da `bot.db` tozalanadi. Foydalanuvchilarni yo'qotmaslik uchun Render'da **Persistent Disk** (pullik, $0.25/GB/oy) ulang va `DB_PATH=/var/data/bot.db` qiling.
+- **24/7 ishlash (bepul plan)**: Render bepul service 15 daqiqa trafiksiz uxlab qoladi. Repo ichidagi
+  `.github/workflows/keepalive.yml` har 5 daqiqada `https://<service>.onrender.com/health` ni ping qiladi —
+  shu tufayli bot doim uyg'oq. GitHub'da **Actions → Render keep-alive → Enable workflow** bo'lishi shart
+  (repo public bo'lsa daqiqalar cheksiz). Qo'shimcha kafolat uchun [UptimeRobot](https://uptimerobot.com)
+  da ham xuddi shu manzilga 5 daqiqali monitor qo'shish mumkin.
+- **Baza saqlanadi (zaxira)**: `bot.db` Render'ning vaqtinchalik diskida bo'ladi, shuning uchun bot uni
+  yopiq GitHub repo'ga (`BACKUP_REPO`) har 10 daqiqada va har to'xtashdan oldin zaxiralaydi, startda esa
+  o'zi tiklaydi. Buning uchun Render → Environment'da `BACKUP_REPO` (masalan `user/pulbot-data`) va
+  `BACKUP_TOKEN` (repo'ga yozish huquqi bor token) bo'lishi kerak. Bu o'zgaruvchilar bo'lmasa — zaxira o'chirilgan.
 - **Homiy kanal** qo'shishdan oldin botni o'sha kanalga **admin** qiling, aks holda obuna tekshiruvi ishlamaydi (bot bunday kanalni e'tiborsiz qoldiradi va xato bermaydi).
 - **Admin panel**: `/admin` buyrug'i. Rollar: `owner` (hamma narsa), `moderator` (xavfsizlik, broadcast, foydalanuvchilar), `accountant` (yechish so'rovlari, hisobotlar). Admin qo'shish: `/admin` → ⚙️ Sozlamalar → 👮 Adminlar boshqaruvi.
 - **Tugma ranglari**: Telegram Bot API 9.4 + aiogram 3.31 kerak (requirements.txt'da ko'rsatilgan). Eski Telegram messenger versiyalarida ranglar ko'rinmaydi (oddiy tugmalar bo'lib chiqadi).
