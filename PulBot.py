@@ -1804,6 +1804,10 @@ async def jobs(bot):
                 await fn(bot)
             except Exception:
                 logging.exception("job xatosi: %s", fn.__name__)
+        try:
+            await backup_push()
+        except Exception:
+            logging.exception("zaxira xatosi")
         await asyncio.sleep(600)
 
 
@@ -1835,12 +1839,108 @@ async def start_health_server():
 
 
 # ----------------------------------------------------------------------------
+# DB ZAXIRASI: Render diski vaqtinchalik (deploy/restart da o'chadi), shuning
+# uchun bazani yopiq GitHub repoga nusxalab turamiz va startda tiklaymiz.
+# BACKUP_REPO / BACKUP_TOKEN muhit o'zgaruvchilari bo'lmasa — o'chirilgan.
+# ----------------------------------------------------------------------------
+BKP_REPO = os.getenv("BACKUP_REPO", "").strip()
+BKP_TOKEN = os.getenv("BACKUP_TOKEN", "").strip()
+BKP_FILE = "bot.db"
+_bkp_state = {"hash": None, "sha": None}
+
+
+def _bkp_headers(raw=False):
+    return {"Authorization": f"token {BKP_TOKEN}",
+            "Accept": "application/vnd.github.raw" if raw else "application/vnd.github+json",
+            "User-Agent": "pulbot-backup"}
+
+
+async def _bkp(method, url, body=None, raw=False):
+    import aiohttp
+    async with aiohttp.ClientSession(headers=_bkp_headers(raw)) as s:
+        async with s.request(method, url, json=body, timeout=aiohttp.ClientTimeout(total=90)) as r:
+            return r.status, await r.read()
+
+
+def _bkp_url():
+    return f"https://api.github.com/repos/{BKP_REPO}/contents/{BKP_FILE}"
+
+
+async def backup_pull():
+    """Startda bazani zaxiradan tiklash (faqat lokal fayl bo'lmasa)."""
+    if not (BKP_REPO and BKP_TOKEN):
+        return
+    if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 0:
+        return
+    try:
+        st, body = await _bkp("GET", _bkp_url(), raw=True)
+        if st == 200 and body[:15] == b"SQLite format 3":
+            with open(DB_PATH, "wb") as f:
+                f.write(body)
+            logging.info("DB zaxiradan tiklandi (%s bayt)", len(body))
+        else:
+            logging.info("Zaxira topilmadi (HTTP %s) — yangi baza yaratiladi", st)
+    except Exception:
+        logging.exception("DB tiklashda xato — yangi baza bilan davom etamiz")
+
+
+async def backup_push():
+    """Bazaning izchil nusxasini yopiq repoga yuklash."""
+    if not (BKP_REPO and BKP_TOKEN):
+        return
+    import base64
+    import hashlib
+    import json as _json
+    tmp = DB_PATH + ".bkp"
+    try:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        await db.execute("VACUUM INTO ?", (tmp,))
+        with open(tmp, "rb") as f:
+            data = f.read()
+        os.remove(tmp)
+    except Exception:
+        logging.exception("DB nusxasini olishda xato")
+        return
+    digest = hashlib.sha256(data).hexdigest()
+    if digest == _bkp_state["hash"]:
+        return
+    try:
+        if _bkp_state["sha"] is None:
+            st, body = await _bkp("GET", _bkp_url())
+            if st == 200:
+                _bkp_state["sha"] = _json.loads(body)["sha"]
+        payload = {"message": f"db backup {datetime.now(UZ_TZ):%Y-%m-%d %H:%M}",
+                   "content": base64.b64encode(data).decode(), "branch": "main"}
+        if _bkp_state["sha"]:
+            payload["sha"] = _bkp_state["sha"]
+        st, body = await _bkp("PUT", _bkp_url(), body=payload)
+        if st in (200, 201):
+            _bkp_state["hash"] = digest
+            _bkp_state["sha"] = _json.loads(body)["content"]["sha"]
+            logging.info("DB zaxirasi yuklandi (%s bayt)", len(data))
+        else:
+            logging.warning("DB zaxirasi yuklanmadi: HTTP %s %s", st, body[:200])
+    except Exception:
+        logging.exception("DB zaxirasini yuklashda xato")
+
+
+# ----------------------------------------------------------------------------
+async def _shutdown_backup(**kwargs):
+    """Render SIGTERM yuborganda (deploy / spin-down) bazani saqlab qolish."""
+    try:
+        await backup_push()
+    except Exception:
+        logging.exception("shutdown zaxira xatosi")
+
+
 async def main():
     global db
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not BOT_TOKEN or not OWNER_ID:
         raise RuntimeError("BOT_TOKEN va OWNER_ID muhit o'zgaruvchilarini kiriting "
                            "(Render → Environment)")
+    await backup_pull()
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
     await db.executescript(SCHEMA)
@@ -1854,6 +1954,7 @@ async def main():
     dp.callback_query.outer_middleware(Guard())
     dp.include_router(user)
     dp.include_router(admin)
+    dp.shutdown.register(_shutdown_backup)
     await start_health_server()
     asyncio.create_task(jobs(bot))
     await dp.start_polling(bot)
