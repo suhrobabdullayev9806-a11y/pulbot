@@ -1,0 +1,33 @@
+name: Render keep-alive
+
+# Render free web-service 15 daqiqa harakatsizlikdan keyin uxlab qoladi.
+# Bu workflow har 5 daqiqada /health ni urib turadi -> servis doim uyg'oq.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: pulbot-keepalive
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Ping /health
+        run: |
+          URL="https://pulbot-9176.onrender.com/health"
+          ok=0
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -m 120 -w "%{http_code}" "$URL" || true)
+            echo "ping $i -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              ok=$((ok + 1))
+            fi
+            sleep 45
+          done
+          echo "done, 200 javoblari: $ok/10"
