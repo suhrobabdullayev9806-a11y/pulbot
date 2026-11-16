@@ -1906,20 +1906,20 @@ async def backup_push():
     if digest == _bkp_state["hash"]:
         return
     try:
-        if _bkp_state["sha"] is None:
-            st, body = await _bkp("GET", _bkp_url())
-            if st == 200:
-                _bkp_state["sha"] = _json.loads(body)["sha"]
-        payload = {"message": f"db backup {datetime.now(UZ_TZ):%Y-%m-%d %H:%M}",
-                   "content": base64.b64encode(data).decode(), "branch": "main"}
-        if _bkp_state["sha"]:
-            payload["sha"] = _bkp_state["sha"]
-        st, body = await _bkp("PUT", _bkp_url(), body=payload)
-        if st in (200, 201):
-            _bkp_state["hash"] = digest
-            _bkp_state["sha"] = _json.loads(body)["content"]["sha"]
-            logging.info("DB zaxirasi yuklandi (%s bayt)", len(data))
-        else:
+        for attempt in (1, 2):
+            if _bkp_state["sha"] is None or attempt == 2:
+                st, body = await _bkp("GET", _bkp_url())
+                _bkp_state["sha"] = _json.loads(body)["sha"] if st == 200 else None
+            payload = {"message": f"db backup {datetime.now(UZ_TZ):%Y-%m-%d %H:%M}",
+                       "content": base64.b64encode(data).decode(), "branch": "main"}
+            if _bkp_state["sha"]:
+                payload["sha"] = _bkp_state["sha"]
+            st, body = await _bkp("PUT", _bkp_url(), body=payload)
+            if st in (200, 201):
+                _bkp_state["hash"] = digest
+                _bkp_state["sha"] = _json.loads(body)["content"]["sha"]
+                logging.info("DB zaxirasi yuklandi (%s bayt)", len(data))
+                return
             logging.warning("DB zaxirasi yuklanmadi: HTTP %s %s", st, body[:200])
     except Exception:
         logging.exception("DB zaxirasini yuklashda xato")
