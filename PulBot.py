@@ -318,7 +318,7 @@ async def gate(bot, uid, chat_id) -> bool:
     if bad:
         kb = InlineKeyboardBuilder()
         for s in bad:
-            kb.row(ib(f"📢 {s['title']}", url=s["link"]))
+            kb.row(ib(f"📢 {esc(s['title'])[:30]}", url=s["link"]))
         kb.row(ib("✅ Tekshirish", callback_data="chk", style=OK))
         await bot.send_message(chat_id,
                                f"🔒 <b>OBUNA TALAB QILINADI</b>\n{DIV}\n"
@@ -502,6 +502,18 @@ async def answer_html_msg(bot, chat_id, text, **kw):
         await bot.send_message(chat_id, html.escape(re.sub(r"<[^>]+>", "", text)), **kw)
 
 
+async def rules_view(bot, chat_id):
+    kb = InlineKeyboardBuilder()
+    kb.row(ib("🎁 Bonus olish", callback_data="m:daily", style=OK),
+           ib("👥 Taklif qilish", callback_data="m:invite", style=OK))
+    kb.row(ib("💰 Balansim", callback_data="m:bal", style=MAIN),
+           ib("⭐ Premium", callback_data="m:prem", style=MAIN))
+    await answer_html_msg(bot, chat_id,
+                          f"{await gs('rules_text')}\n{DIV}\n"
+                          f"<i>Savollar bo'lsa 🆘 Yordam bo'limiga yozing.</i>",
+                          reply_markup=kb.as_markup())
+
+
 
 # ----------------------------------------------------------------------------
 # FOYDALANUVCHI QISMI
@@ -587,7 +599,7 @@ async def menu_router(m: Message, state: FSMContext, bot: Bot):
     elif t == B_PREM:
         await view_premium(bot, m.chat.id, uid)
     elif t == B_RULES:
-        await answer_html(m, await gs("rules_text"))
+        await rules_view(bot, m.chat.id)
     elif t == B_HELP:
         await state.set_state(H.msg)
         await m.answer(f"✍️ <b>Yordam</b>\n{DIV}\nSavol yoki muammoingizni yozing.\n"
@@ -617,7 +629,7 @@ async def menu_cb(c: CallbackQuery, state: FSMContext, bot: Bot):
     elif act == "prem":
         await view_premium(bot, chat_id, uid)
     elif act == "rules":
-        await answer_html_msg(bot, chat_id, await gs("rules_text"))
+        await rules_view(bot, chat_id)
     elif act == "help":
         await state.set_state(H.msg)
         await bot.send_message(chat_id, f"🆘 <b>YORDAM</b>\n{DIV}\n"
@@ -670,14 +682,16 @@ def make_card(name, balance, link) -> bytes | None:
         # oltin ramka
         d.rounded_rectangle([30, 30, W_ - 30, H_ - 30], radius=28, outline=(255, 200, 60), width=3)
         d.ellipse([W_ - 210, -90, W_ + 60, 180], fill=(255, 200, 60))
-        d.text((70, 75), "PUL ISHLA UZ", fill=(255, 200, 60), font=ImageFont.load_default(size=30))
-        d.text((70, 130), "Men yig'dim", fill=(200, 210, 225), font=ImageFont.load_default(size=40))
-        d.text((70, 200), f"{fmt(balance)} so'm", fill="white", font=ImageFont.load_default(size=96))
+        d.text((70, 78), "PUL ISHLA UZ", fill=(255, 200, 60), font=ImageFont.load_default(size=30))
+        d.text((70, 128), "MEN YIG'DIM", fill=(150, 165, 190), font=ImageFont.load_default(size=26))
+        d.text((70, 185), f"{fmt(balance)} so'm", fill="white", font=ImageFont.load_default(size=92))
         d.line([(70, 340), (W_ - 70, 340)], fill=(70, 85, 110), width=2)
-        d.text((70, 370), f"👤 {str(name)[:28]}", fill=(210, 220, 235), font=ImageFont.load_default(size=36))
-        d.text((70, 425), "🔗 " + link, fill=(120, 175, 255), font=ImageFont.load_default(size=30))
-        d.text((70, 480), "Siz ham taklif qiling va pul ishlang!", fill=(255, 200, 60),
-               font=ImageFont.load_default(size=26))
+        d.text((70, 368), str(name)[:28] or "Foydalanuvchi", fill=(210, 220, 235),
+               font=ImageFont.load_default(size=36))
+        link_short = link.replace("https://", "")
+        d.text((70, 424), link_short[:46], fill=(120, 175, 255), font=ImageFont.load_default(size=28))
+        d.text((70, 482), "Siz ham taklif qiling va pul ishlang!", fill=(255, 200, 60),
+               font=ImageFont.load_default(size=24))
         buf = io.BytesIO()
         img.save(buf, "PNG")
         return buf.getvalue()
@@ -722,10 +736,17 @@ async def view_daily(bot: Bot, chat_id: int, uid: int):
     today = today_local().isoformat()
     yest = (today_local() - timedelta(days=1)).isoformat()
     if u["last_daily"] == today:
+        kb = InlineKeyboardBuilder()
+        kb.row(ib("👥 Do'st taklif qilish", callback_data="m:invite", style=OK),
+               ib("💰 Balansim", callback_data="m:bal", style=MAIN))
+        kb.row(ib("🏆 Reyting", callback_data="m:rate", style=MAIN))
         return await bot.send_message(chat_id,
-                                      f"⏳ <b>Bugungi bonus allaqachon olingan</b>\n{DIV}\n"
+                                      f"⏳ <b>BUGUNGI BONUS OLINGAN</b>\n{DIV}\n"
                                       f"🔥 Streak: <b>{u['streak']} kun</b>\n"
-                                      f"🗓 Ertaga qayta tashrif buyuring — bonus yangilanadi!")
+                                      f"🗓 Ertaga qayta tashrif buyuring — bonus yangilanadi!\n"
+                                      f"{THIN}\n"
+                                      f"<i>Bugun do'st taklif qilib daromad qilishingiz mumkin.</i>",
+                                      reply_markup=kb.as_markup())
     streak = u["streak"] + 1 if u["last_daily"] == yest else 1
     lo, hi = await gs("daily_min"), await gs("daily_max")
     amt = random.randint(min(lo, hi), max(lo, hi))
